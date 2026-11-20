@@ -343,37 +343,56 @@ class Routine {
  public:
   Routine(RoutinePort& p, const Trigger t) : port(p), trigger(t), startMs(p.millis()) {}
 
-  Result run() {
+  Result run(const bool checkInbox) {
     if (!port.provisioned()) return finish(Status::SkippedNotProvisioned);
     const int battery = port.batteryPercent();
 
-    // 1. A trusted "now" before deciding anything (fail closed).
-    if (!establishClock(battery)) return finish(Status::SkippedNoClock);
+    // 1. A trusted "now" before deciding anything (fail closed). A wake check
+    // only loses the daily part without one: once the radio is up it still
+    // looks for new content.
+    const bool haveClock = establishClock(battery, checkInbox);
+    if (!haveClock) {
+      if (!checkInbox) return finish(Status::SkippedNoClock);
+      if (battery < kDailyJoinBatteryFloor) return finish(Status::SkippedLowBattery);
+      if (!ownWifi) return finish(joinFailed ? Status::SkippedNoWifi : Status::SkippedNoClock);
+    }
 
     // 2. The 06:00 gate.
-    const std::string tz = port.timezone();
-    result.boundary = mostRecentBoundary(result.now, tz.c_str());
-    if (result.boundary < 0) return finish(Status::SkippedNoClock);
-    if (!isDue(result.now, port.lastRun(), result.boundary)) return finish(Status::NotDue);
+    bool maintenanceDue = false;
+    if (haveClock) {
+      const std::string tz = port.timezone();
+      const int64_t boundary = mostRecentBoundary(result.now, tz.c_str());
+      if (boundary >= 0) {
+        result.boundary = boundary;
+        maintenanceDue = isDue(result.now, port.lastRun(), boundary);
+      } else if (!checkInbox) {
+        result.boundary = boundary;
+        return finish(Status::SkippedNoClock);
+      }
+    }
+    if (!maintenanceDue && !checkInbox) return finish(Status::NotDue);
 
     // 3. Battery floor for the whole routine. last_run stays unwritten so a
-    // charged start later today still runs it.
+    // charged start later today still runs it. The note is about the daily
+    // sync: a wake check between two daily runs skips without it.
     if (battery < kDailyJoinBatteryFloor) {
-      port.setNote(Note::LowBattery);
+      if (maintenanceDue) port.setNote(Note::LowBattery);
       return finish(Status::SkippedLowBattery);
     }
 
-    // 4. Wi-Fi.
-    if (!ensureWifi()) return finish(Status::SkippedNoWifi);
+    // 4. Wi-Fi. A wake check shows that the device is busy (the retained sleep
+    // image is still on the panel) and joins only a network the scan found.
+    if (checkInbox && !ownWifi) port.showStage(Stage::WakeCheck);
+    if (!ensureWifi(checkInbox)) return finish(Status::SkippedNoWifi);
 
-    result.fields.startedAt = isoUtc(result.now);
+    if (haveClock) result.fields.startedAt = isoUtc(result.now);
     result.fields.trigger = triggerName(trigger);
 
     // 5. Firmware. Returns true when an image was installed (reboot pending).
     // A step that learns nothing about the offer (no check made, or the check
     // failed) keeps a pending note: the offer may still be outstanding.
     Note note = port.note() == Note::FirmwarePending ? Note::FirmwarePending : Note::None;
-    if (firmwareStep(battery, note)) {
+    if (maintenanceDue && firmwareStep(battery, note)) {
       result.status = Status::Rebooting;
       port.setNote(Note::None);
       syncRtc(false);  // the reboot is not held up for a late answer
@@ -388,11 +407,13 @@ class Routine {
     const uint32_t hard = rem > 0 ? rem : 1;  // 0 would mean "no budget" downstream
     const uint32_t itemBudget = hard > kSyncTailMs ? hard - kSyncTailMs : 1;
     port.showStage(Stage::Syncing);
-    result.sync = port.runSync(result.fields, itemBudget, hard);
+    // Between two daily runs the wake check leaves the inventory re-hash out.
+    result.sync = maintenanceDue ? port.runSync(result.fields, itemBudget, hard)
+                                 : port.runQuickSync(result.fields, itemBudget, hard);
     result.fields.contentOutcome = contentOutcome(result.sync);
 
     // 7. Done for this routine-day.
-    port.setLastRun(result.now);
+    if (maintenanceDue) port.setLastRun(result.now);
     return finish(Status::Ran);
   }
 
@@ -401,6 +422,7 @@ class Routine {
   const Trigger trigger;
   const uint32_t startMs;
   bool ownWifi = false;
+  bool joinFailed = false;  // a join was tried and no network was joined
   Result result;
   bool rtcSyncBlocked = false;  // SNTP's answer could not be trusted this run
 
@@ -427,7 +449,7 @@ class Routine {
   // Waits for a late answer at most min(kClockSyncBudgetMs, what is left of the
   // cap), and only when `mayWait`. Leaves the run's status and outcomes alone.
   void syncRtc(const bool mayWait) {
-    if (rtcSyncBlocked) return;
+    if (rtcSyncBlocked || !port.hasRtc()) return;
     // The routine's own syncClock() succeeded: SNTP is done (and may have
     // consumed the COMPLETED status), no wait.
     bool answered = result.clock == ClockSource::Network || port.sntpCompleted();
@@ -444,18 +466,23 @@ class Routine {
     result.rtcWritten = port.writeRtc(epoch);
   }
 
-  bool ensureWifi() {
+  bool ensureWifi(const bool inRangeOnly = false) {
     if (port.wifiConnected()) {
       ownWifi = true;
       return true;
     }
     const uint32_t budget = cap(kJoinBudgetMs, remaining());
-    if (budget == 0 || !port.joinWifi(budget)) return false;
+    if (budget == 0) return false;
+    if (!(inRangeOnly ? port.joinWifiInRange(budget) : port.joinWifi(budget))) {
+      joinFailed = true;
+      return false;
+    }
     ownWifi = true;
     return true;
   }
 
-  bool establishClock(const int battery) {
+  // `wakeCheck`: the join scans first, and SNTP gets the shorter budget.
+  bool establishClock(const int battery, const bool wakeCheck) {
     const ClockChoice local =
         chooseLocalClock(port.bootClockEpoch(), port.systemClockEpoch(), port.rtcEpoch(), port.timeFloor());
     if (local.source == ClockSource::Rtc && port.sntpCompleted()) {
@@ -480,8 +507,8 @@ class Routine {
     // the join (then the routine cannot know whether it is due).
     if (battery < kDailyJoinBatteryFloor) return false;
     port.showStage(Stage::Clock);
-    if (!ensureWifi()) return false;
-    const uint32_t budget = cap(kClockSyncBudgetMs, remaining());
+    if (!ensureWifi(wakeCheck)) return false;
+    const uint32_t budget = cap(wakeCheck ? kWakeClockBudgetMs : kClockSyncBudgetMs, remaining());
     const int64_t synced = budget > 0 ? port.syncClock(budget) : 0;
     if (synced < kMinPlausibleEpoch) return false;
     result.clock = ClockSource::Network;
@@ -577,7 +604,9 @@ class Routine {
 
 }  // namespace
 
-Result run(RoutinePort& port, const Trigger trigger) { return Routine(port, trigger).run(); }
+Result run(RoutinePort& port, const Trigger trigger, const bool checkInbox) {
+  return Routine(port, trigger).run(checkInbox);
+}
 
 }  // namespace xteink::daily
 
@@ -711,6 +740,7 @@ class DevicePort final : public RoutinePort {
   // UTC straight to the RTC: never syncFromNTP/configTzTime/setenv/tzset here
   // (the render task formats the clock under the process TZ).
   bool writeRtc(const int64_t epoch) override { return halClock.isAvailable() && halClock.setUtc(epoch); }
+  bool hasRtc() override { return halClock.isAvailable(); }
   std::string timezone() override {
     // xteink builds default the Home clock to Asia/Jerusalem
     // (XTEINK_CLOCK_DEFAULTS, util/Timezones.cpp). A device whose timezone was
@@ -721,12 +751,14 @@ class DevicePort final : public RoutinePort {
   }
 
   bool wifiConnected() override { return WiFi.status() == WL_CONNECTED; }
-  bool joinWifi(const uint32_t budgetMs) override {
+  bool joinWifi(const uint32_t budgetMs) override { return joinSaved(budgetMs, /*scanFirst=*/false); }
+  bool joinWifiInRange(const uint32_t budgetMs) override { return joinSaved(budgetMs, /*scanFirst=*/true); }
+  bool joinSaved(const uint32_t budgetMs, const bool scanFirst) {
     if (!storeLoaded) {
       WIFI_STORE.loadFromFile();
       storeLoaded = true;
     }
-    const wifijoin::Result r = wifijoin::joinAnySaved(budgetMs);
+    const wifijoin::Result r = wifijoin::joinAnySaved(budgetMs, scanFirst);
     if (!r.ok()) {
       LOG_ERR(kTag, "Wi-Fi join failed: %s", wifijoin::errorName(r.error));
       return false;
@@ -789,17 +821,26 @@ class DevicePort final : public RoutinePort {
   }
   sync::Outcome runSync(const sync::RunFields& fields, const uint32_t itemBudgetMs,
                         const uint32_t hardBudgetMs) override {
+    return syncWith(fields, itemBudgetMs, hardBudgetMs, /*quickInventory=*/false);
+  }
+  sync::Outcome runQuickSync(const sync::RunFields& fields, const uint32_t itemBudgetMs,
+                             const uint32_t hardBudgetMs) override {
+    return syncWith(fields, itemBudgetMs, hardBudgetMs, /*quickInventory=*/true);
+  }
+  sync::Outcome syncWith(const sync::RunFields& fields, const uint32_t itemBudgetMs, const uint32_t hardBudgetMs,
+                         const bool quickInventory) {
     CancelCtx ctx{::millis(), hardBudgetMs};
     sync::Callbacks cb;
     cb.ctx = &ctx;
     cb.shouldCancel = &syncShouldCancel;
-    return sync::run(&renderer, cb, itemBudgetMs, &fields);
+    return sync::run(&renderer, cb, itemBudgetMs, &fields, quickInventory);
   }
 
   void showStage(const Stage stage) override {
     const char* text = nullptr;
     switch (stage) {
       case Stage::Clock:
+      case Stage::WakeCheck:
         text = tr(STR_XTEINK_SYNC_CONTACTING);
         break;
       case Stage::CheckingFirmware:
@@ -826,14 +867,19 @@ class DevicePort final : public RoutinePort {
 }  // namespace
 
 void onBoot(GfxRenderer& renderer, const BootKind kind, const bool silentReboot, const bool panicReboot,
-            const bool recoveryMode, const bool deepSleepWake, const int64_t bootClockEpoch) {
+            const bool recoveryMode, const bool deepSleepWake, const int64_t bootClockEpoch, const WakePolicy policy) {
   if (!bootQualifies(kind, silentReboot, panicReboot, recoveryMode)) {
     releaseWifi();  // a passed health check may have left the station up
     return;
   }
+  if (policy == WakePolicy::Skip) {
+    releaseWifi();
+    LOG_INF(kTag, "Daily routine: skipped (resuming a book)");
+    return;
+  }
   DevicePort port(renderer, bootClockEpoch);
   const uint32_t startMs = millis();
-  const Result r = run(port, deepSleepWake ? Trigger::Wake : Trigger::PowerOn);
+  const Result r = run(port, deepSleepWake ? Trigger::Wake : Trigger::PowerOn, policy == WakePolicy::CheckInbox);
   releaseWifi();  // NotDue and the early skips never owned the radio
   LOG_INF(kTag, "Daily routine: %s (clock %s, fw %s, content %s, rtc_written %s, %lu ms)", statusName(r.status),
           clockSourceName(r.clock), r.fields.fwOutcome.empty() ? "-" : r.fields.fwOutcome.c_str(),

@@ -54,14 +54,16 @@ Attempt tryJoin(WifiPort& port, const Credential& cred, uint32_t start, uint32_t
 
 }  // namespace
 
-Result joinAnySaved(WifiPort& port, uint32_t deadlineMs) {
+Result joinAnySaved(WifiPort& port, uint32_t deadlineMs, const bool scanFirst) {
   const uint32_t start = port.millis();
   if (port.savedCount() == 0) return {Error::NoSavedNetworks, {}};
 
   bool anyInRange = false;
   const std::string last = port.lastConnectedSsid();
 
-  if (!last.empty()) {
+  // scanFirst: no blind attempt. Out of range it would cost a whole
+  // kPerNetworkTimeoutMs before the scan could say so.
+  if (!scanFirst && !last.empty()) {
     if (const auto cred = port.findCredential(last)) {
       anyInRange = true;  // attempted blindly; refined by the scan below
       switch (tryJoin(port, *cred, start, deadlineMs)) {
@@ -83,12 +85,17 @@ Result joinAnySaved(WifiPort& port, uint32_t deadlineMs) {
   std::stable_sort(found.begin(), found.end(),
                    [](const ScanResult& a, const ScanResult& b) { return a.rssi > b.rssi; });
 
+  // The last network was not tried blindly: when it is in range it goes first.
+  if (scanFirst && !last.empty()) {
+    std::stable_partition(found.begin(), found.end(), [&last](const ScanResult& r) { return r.ssid == last; });
+  }
+
   std::vector<std::string> tried;
-  if (!last.empty()) tried.push_back(last);
+  if (!scanFirst && !last.empty()) tried.push_back(last);
   bool attempted = !tried.empty() && anyInRange;
   bool sawSaved = false;
   for (const auto& r : found) {
-    if (r.ssid.empty() || r.ssid == last) continue;
+    if (r.ssid.empty()) continue;
     if (std::find(tried.begin(), tried.end(), r.ssid) != tried.end()) continue;
     const auto cred = port.findCredential(r.ssid);
     if (!cred) continue;
@@ -157,9 +164,9 @@ class ArduinoPort : public WifiPort {
 };
 }  // namespace
 
-Result joinAnySaved(uint32_t deadlineMs) {
+Result joinAnySaved(uint32_t deadlineMs, const bool scanFirst) {
   ArduinoPort port;
-  const Result r = joinAnySaved(port, deadlineMs);
+  const Result r = joinAnySaved(port, deadlineMs, scanFirst);
   if (r.ok()) WIFI_STORE.setLastConnectedSsid(r.ssid);
   return r;
 }

@@ -652,11 +652,18 @@ void setup() {
   // The daily routine below releases the radio, so a passed check leaves it up for it.
   xteink::otahealth::onBoot(display.getFrameBuffer() != nullptr, /*sdOk=*/true, /*routineFollows=*/true);
 
+  // An ordinary start goes back into the book it was put to sleep in, unless
+  // Back is held or the last attempt to open that book did not finish.
+  const bool resumesBook = !APP_STATE.openEpubPath.empty() && APP_STATE.lastSleepFromReader &&
+                           !mappedInputManager.isPressed(MappedInputManager::Button::Back) &&
+                           APP_STATE.readerActivityLoadCount == 0;
+
   // xteink: once-a-day start routine (battery, Wi-Fi, OTA, book sync) before
   // Home or a resumed book opens. Power-button and plain boots only; bounded
   // by a wall-clock cap, never waits for input (DailyRoutine.h).
   {
     using xteink::daily::BootKind;
+    using xteink::daily::WakePolicy;
     BootKind bootKind = BootKind::Other;
     switch (wakeupReason) {
       case HalGPIO::WakeupReason::PowerButton:
@@ -672,8 +679,15 @@ void setup() {
       default:
         break;
     }
+    // The original X4 starts without a clock (no RTC, powered off while asleep
+    // on battery): it leaves a resumed book alone and checks for new content
+    // on the way to Home.
+    WakePolicy policy = WakePolicy::Daily;
+    if (gpio.deviceIsX4() && bootKind == BootKind::PowerButton) {
+      policy = resumesBook ? WakePolicy::Skip : WakePolicy::CheckInbox;
+    }
     xteink::daily::onBoot(renderer, bootKind, isSilentReboot, rebootedFromPanic, recoveryFirmwareMode,
-                          esp_reset_reason() == ESP_RST_DEEPSLEEP, bootClockEpoch);
+                          esp_reset_reason() == ESP_RST_DEEPSLEEP, bootClockEpoch, policy);
   }
 
   // Output polarity is resolved per render by ActivityManager (night mode
@@ -709,8 +723,7 @@ void setup() {
     // through to the sleep-wake "resume reader" logic, which fires on stale
     // openEpubPath + lastSleepFromReader from a prior session.
     activityManager.goHome();
-  } else if (APP_STATE.openEpubPath.empty() || !APP_STATE.lastSleepFromReader ||
-             mappedInputManager.isPressed(MappedInputManager::Button::Back) || APP_STATE.readerActivityLoadCount > 0) {
+  } else if (!resumesBook) {
     // Boot to home screen if no book is open, last sleep was not from reader, back button is held, or reader activity
     // crashed (indicated by readerActivityLoadCount > 0)
     activityManager.goHome(HomeMenuItem::NONE, needsWakeRefresh);

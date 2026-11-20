@@ -385,12 +385,12 @@ TEST(XteinkOtaDecision, RolledBackListIsABoundedNewestFirstRing) {
 }
 
 TEST(XteinkOtaDecision, LanOriginMatchesServerOrder) {
-  EXPECT_TRUE(isLanOrigin("http://xteink.local:8781", ""));
+  EXPECT_FALSE(isLanOrigin("http://xteink.local:8781", ""));
   EXPECT_TRUE(isLanOrigin("http://192.168.1.20:8781", "HTTP://192.168.1.20:8781/"));
   EXPECT_FALSE(isLanOrigin("https://xteink.culture.dev", ""));
   EXPECT_FALSE(isLanOrigin("https://xteink.culture.dev", "http://192.168.1.20:8781"));
   // Every LAN entry of serverOrder() is recognised as LAN, the tunnel is not.
-  const auto order = serverOrder("http://10.0.0.5:8781", "");
+  const auto order = serverOrder("http://10.0.0.5:8781", "https://reader.example.org");
   ASSERT_EQ(order.size(), 2u);
   EXPECT_TRUE(isLanOrigin(order[0], "http://10.0.0.5:8781"));
   EXPECT_FALSE(isLanOrigin(order[1], "http://10.0.0.5:8781"));

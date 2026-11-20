@@ -25,9 +25,11 @@
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "activities/plugins/PluginCatalogActivity.h"  // anyPluginInstalled()
+#include "activities/settings/XteinkSyncActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "xteink/ClockTick.h"
+#include "xteink/XteinkConfig.h"
 #include "xteink/XteinkSync.h"
 
 int HomeActivity::getMenuItemCount() const {
@@ -36,6 +38,9 @@ int HomeActivity::getMenuItemCount() const {
     count += recentBooks.size();
   }
   if (hasLibrarySlot()) {
+    count++;
+  }
+  if (hasSyncSlot()) {
     count++;
   }
   return count;
@@ -251,7 +256,10 @@ void HomeActivity::onEnter() {
   }
 
   const auto base = static_cast<int>(recentBooks.size());
-  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, hasLibrarySlot());
+  hasSync = !xteink::config::getDeviceKey().empty();
+  selectorIndex = initialMenuItem == HomeMenuItem::NONE
+                      ? 0
+                      : base + menuItemToIndex(initialMenuItem, hasLibrarySlot(), hasSyncSlot());
 
   clockTick = xteink::clocktick::State{};
   clockHalfPending.store(false);
@@ -341,7 +349,7 @@ void HomeActivity::loop() {
       return;
     }
     const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
-    switch (indexToMenuItem(menuIndex, hasLibrarySlot())) {
+    switch (indexToMenuItem(menuIndex, hasLibrarySlot(), hasSyncSlot())) {
       case HomeMenuItem::FILE_BROWSER:
         onFileBrowserOpen();
         break;
@@ -353,6 +361,9 @@ void HomeActivity::loop() {
         break;
       case HomeMenuItem::FILE_TRANSFER:
         onFileTransferOpen();
+        break;
+      case HomeMenuItem::XTEINK_SYNC:
+        onSyncOpen();
         break;
       case HomeMenuItem::SETTINGS_MENU:
         onSettingsOpen();
@@ -568,6 +579,11 @@ void HomeActivity::render(RenderLock&&) {
     menuIcons.insert(menuIcons.begin() + 2, Plugins);
   }
 
+  if (hasSyncSlot()) {
+    menuItems.insert(menuItems.end() - 1, tr(STR_XTEINK_SYNC_NOW));
+    menuIcons.insert(menuIcons.end() - 1, Wifi);
+  }
+
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
     // Insert Continue Reading at the top if enabled in theme
     menuItems.insert(menuItems.begin(), tr(STR_CONTINUE_READING));
@@ -613,6 +629,15 @@ void HomeActivity::onLibraryOpen() { activityManager.goToLibrary(); }
 void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
+
+void HomeActivity::onSyncOpen() {
+  auto activity = makeUniqueNoThrow<XteinkSyncActivity>(renderer, mappedInput);
+  if (!activity) {
+    LOG_ERR("HOME", "OOM: XteinkSyncActivity");
+    return;
+  }
+  activityManager.replaceActivity(std::move(activity));
+}
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
 

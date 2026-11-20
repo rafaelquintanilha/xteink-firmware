@@ -136,10 +136,10 @@ bool isHttps(const std::string& origin) { return origin.rfind("https://", 0) == 
 std::vector<std::string> serverOrder(const std::string& lanUrl, const std::string& tunnelUrl) {
   std::vector<std::string> out;
   out.reserve(2);
-  const std::string lan = normalizeOrigin(lanUrl.empty() ? kDefaultLanUrl : lanUrl);
+  const std::string lan = normalizeOrigin(lanUrl);
   if (!lan.empty()) out.push_back(lan);
   // The tunnel crosses the internet: plain http there would expose the key.
-  const std::string tunnel = normalizeOrigin(tunnelUrl.empty() ? kDefaultTunnelUrl : tunnelUrl);
+  const std::string tunnel = normalizeOrigin(tunnelUrl);
   if (!tunnel.empty() && isHttps(tunnel) && tunnel != lan) out.push_back(tunnel);
   return out;
 }
@@ -226,7 +226,7 @@ ItemKind parseItemKind(const std::string& s) {
 const char* kindFolder(const ItemKind kind) {
   switch (kind) {
     case ItemKind::Article:
-      return "/xteink/articles";
+      return "/Articles";
     case ItemKind::Transcript:
       return "/xteink/transcripts";
     case ItemKind::Newspaper:
@@ -234,7 +234,7 @@ const char* kindFolder(const ItemKind kind) {
     case ItemKind::Book:
       break;
   }
-  return "/xteink";
+  return "/Books";
 }
 
 bool parseQueue(const char* json, const size_t len, Queue& out) {
@@ -561,7 +561,7 @@ OtaDecision decideOta(const FirmwareOffer& offer, const std::string& runningVers
 }
 
 bool isLanOrigin(const std::string& origin, const std::string& lanUrl) {
-  const std::string lan = normalizeOrigin(lanUrl.empty() ? kDefaultLanUrl : lanUrl);
+  const std::string lan = normalizeOrigin(lanUrl);
   return !lan.empty() && origin == lan;
 }
 

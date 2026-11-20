@@ -14,8 +14,6 @@ namespace xteink::sync {
 
 constexpr const char* kProtocolHeader = "X-Xteink-Protocol";
 constexpr const char* kProtocolVersion = "1";
-constexpr const char* kDefaultLanUrl = "http://xteink.local:8781";
-constexpr const char* kDefaultTunnelUrl = "https://xteink.culture.dev";
 
 // Caps that keep one sync's heap use bounded. Items beyond kMaxItems stay
 // queued on the server and arrive on the next sync.
@@ -57,9 +55,8 @@ bool isFatal(Error e);
 
 // --- server order --------------------------------------------------------
 
-// Origins to try, in order (decision c60): the provisioned LAN URL, or
-// kDefaultLanUrl when none is set, then the provisioned tunnel URL, or
-// kDefaultTunnelUrl. Each is normalized ("scheme://host[:port]", lowercase
+// Try the provisioned LAN and then the provisioned tunnel. Empty origins
+// are skipped. Each is normalized ("scheme://host[:port]", lowercase
 // scheme and host, no path or trailing slash); unusable or duplicate entries
 // are dropped. Tunnel origins must be https.
 std::vector<std::string> serverOrder(const std::string& lanUrl, const std::string& tunnelUrl);
@@ -123,12 +120,7 @@ enum class ItemKind : uint8_t { Book, Article, Transcript, Newspaper };
 // anything else -> Book.
 ItemKind parseItemKind(const std::string& s);
 
-// Root of everything the server delivers; books land directly in it.
-constexpr const char* kBooksDir = "/xteink";
-
-// SD folder (no trailing slash) for a kind: kBooksDir ("/xteink") for Book,
-// "/xteink/articles", "/xteink/transcripts", "/xteink/newspapers". An
-// out-of-range value gets the Book folder.
+// Destination on the SD card. Unknown kinds use the books folder.
 const char* kindFolder(ItemKind kind);
 
 struct QueueItem {
@@ -308,8 +300,7 @@ const char* otaDecisionName(OtaDecision d);
 OtaDecision decideOta(const FirmwareOffer& offer, const std::string& runningVersion, bool viaTunnel,
                       bool tunnelOtaEnabled, const std::string& rolledBackList = "");
 
-// True when `origin` is the LAN origin serverOrder() derives from `lanUrl`
-// (kDefaultLanUrl when empty).
+// True when the origin matches a configured LAN server.
 bool isLanOrigin(const std::string& origin, const std::string& lanUrl);
 
 // Seam between the install control flow below and the device: HTTP, the

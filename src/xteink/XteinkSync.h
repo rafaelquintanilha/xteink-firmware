@@ -43,8 +43,12 @@ struct Outcome {
 // `runFields` (optional, the daily routine's) adds run_started_at, run_trigger
 // and fw_outcome to both status reports and content_outcome to the closing
 // one; a manual sync passes none, so no stale run fields are sent.
+// `quickInventory` (the X4 wake check between two daily runs) leaves out the
+// re-hash of every delivered file before the first request: files still on the
+// card are reported as delivered, and a file is hashed only where the answer
+// decides something (an item already on the card, a name clash, a delete).
 Outcome run(const GfxRenderer* renderer, const Callbacks& callbacks, uint32_t itemBudgetMs = 0,
-            const RunFields* runFields = nullptr);
+            const RunFields* runFields = nullptr, bool quickInventory = false);
 
 // Wi-Fi join hook (WifiSelectionActivity): runs a bounded sync when a device
 // key is provisioned, no book is open and the heap allows it.

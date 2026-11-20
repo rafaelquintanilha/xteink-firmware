@@ -51,7 +51,7 @@ constexpr const char* kFirmwareVersion = "xteink-fw " CROSSPOINT_VERSION;
 // Delivered books land here, apart from anything the user sideloads.
 constexpr const char* kManifestPath = "/.crosspoint/xteink-delivered.json";
 constexpr const char* kManifestTmp = "/.crosspoint/xteink-delivered.json.tmp";
-// One download at a time, staged here and renamed into kBooksDir once verified.
+// One download at a time, staged here and renamed into the destination folder once verified.
 constexpr const char* kPartPath = "/.crosspoint/xteink-download.part";
 constexpr const char* kNvsNamespace = "xteink";  // shared with XteinkConfig
 constexpr const char* kNvsLastResult = "sync_last";
@@ -479,15 +479,11 @@ Error downloadItem(const Session& session, const QueueItem& item, const Callback
   return Error::Download;
 }
 
-bool isOurs(const Manifest& m, const std::string& path) {
-  return std::any_of(m.files.begin(), m.files.end(), [&path](const DeliveredFile& f) { return f.path == path; });
-}
-
-// Moves the verified kPartPath into the item's kind folder (kindFolder(), under
-// kBooksDir). Never overwrites a sideloaded or user-modified file.
-bool placeFile(const QueueItem& item, const Manifest& m, const std::vector<std::string>& modified,
-               std::string& outPath) {
-  // Storage.mkdir creates missing parents, so this also makes kBooksDir.
+// Moves the verified kPartPath into the folder for its kind. Never overwrites a sideloaded or user-modified file.
+// `rehashBuf` (kHashChunk bytes) is set when the inventory was not re-hashed:
+// a file about to be replaced is then hashed here against its manifest entry.
+bool placeFile(const QueueItem& item, const Manifest& m, const std::vector<std::string>& modified, std::string& outPath,
+               uint8_t* rehashBuf = nullptr) {
   const char* const folder = kindFolder(item.kind);
   if (!Storage.exists(folder) && !Storage.mkdir(folder)) {
     LOG_ERR(kTag, "Cannot create folder %s", folder);
@@ -505,7 +501,14 @@ bool placeFile(const QueueItem& item, const Manifest& m, const std::vector<std::
   if (Storage.exists(path.c_str())) {
     path = base + bookFileNameWithId(item.title, item.id, item.format);
     if (Storage.exists(path.c_str())) {
-      if (!isOurs(m, path) || contains(modified, path)) {
+      const auto ours =
+          std::find_if(m.files.begin(), m.files.end(), [&path](const DeliveredFile& f) { return f.path == path; });
+      bool intact = ours != m.files.end() && !contains(modified, path);
+      if (intact && rehashBuf) {
+        std::string sha;
+        intact = hashFile(path, rehashBuf, sha) && sha == ours->sha256;
+      }
+      if (!intact) {
         LOG_ERR(kTag, "Name taken by a file we did not deliver: %s", path.c_str());
         return false;
       }
@@ -583,7 +586,8 @@ int64_t reportFreeBytes(const int64_t pendingBytes, bool& measured) {
 
 }  // namespace
 
-Outcome run(const GfxRenderer* renderer, const Callbacks& cb, const uint32_t itemBudgetMs, const RunFields* runFields) {
+Outcome run(const GfxRenderer* renderer, const Callbacks& cb, const uint32_t itemBudgetMs, const RunFields* runFields,
+            const bool quickInventory) {
   Outcome out;
   const uint32_t started = millis();
   const std::string key = config::getDeviceKey();
@@ -612,7 +616,9 @@ Outcome run(const GfxRenderer* renderer, const Callbacks& cb, const uint32_t ite
     return out;
   }
 
-  // 1. Inventory: re-hash every delivered file still on the card.
+  // 1. Inventory: re-hash every delivered file still on the card. A quick
+  // inventory only drops the files that are gone; `modified` then holds just
+  // the files hashed on demand below.
   uint32_t phaseMs = millis();
   Manifest manifest;
   loadManifest(manifest);
@@ -628,15 +634,15 @@ Outcome run(const GfxRenderer* renderer, const Callbacks& cb, const uint32_t ite
         continue;
       }
       std::string sha;
-      if (!hashFile(f.path, hashBuf.get(), sha) || sha != f.sha256) modified.push_back(f.path);
+      if (!quickInventory && (!hashFile(f.path, hashBuf.get(), sha) || sha != f.sha256)) modified.push_back(f.path);
       ++i;
     }
     if (pruned) saveManifest(manifest);
   }
   // Phase timings locate where a slow sync spends its time before the first
   // request (r21: 11 s between "Sync start" and the LAN verdict on the X3).
-  LOG_INF(kTag, "Inventory: %u files hashed in %lu ms", static_cast<unsigned>(manifest.files.size()),
-          static_cast<unsigned long>(millis() - phaseMs));
+  LOG_INF(kTag, "Inventory: %u files %s in %lu ms", static_cast<unsigned>(manifest.files.size()),
+          quickInventory ? "listed" : "hashed", static_cast<unsigned long>(millis() - phaseMs));
 
   const LastResult previous = previousResult();
   StatusReport report;
@@ -773,7 +779,15 @@ Outcome run(const GfxRenderer* renderer, const Callbacks& cb, const uint32_t ite
     // Already on the card from an earlier sync whose ack did not arrive:
     // ack it again instead of downloading a duplicate.
     const DeliveredFile* have = manifest.findBySha(item.sha256);
-    const bool alreadyHere = have && !contains(modified, have->path) && Storage.exists(have->path.c_str());
+    bool alreadyHere = have && !contains(modified, have->path) && Storage.exists(have->path.c_str());
+    if (alreadyHere && quickInventory) {
+      // Not hashed at the start: confirm the copy before acking it unseen.
+      std::string onCard;
+      if (!hashFile(have->path, hashBuf.get(), onCard) || onCard != have->sha256) {
+        modified.push_back(have->path);
+        alreadyHere = false;
+      }
+    }
     bool downloaded = false;
     std::string path;
     if (alreadyHere) {
@@ -789,7 +803,7 @@ Outcome run(const GfxRenderer* renderer, const Callbacks& cb, const uint32_t ite
         noteItemError(e, item.id);
         continue;
       }
-      if (!placeFile(item, manifest, modified, path)) {
+      if (!placeFile(item, manifest, modified, path, quickInventory ? hashBuf.get() : nullptr)) {
         Storage.remove(kPartPath);
         noteItemError(Error::SdCard, item.id);
         continue;

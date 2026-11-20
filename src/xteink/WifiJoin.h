@@ -58,12 +58,18 @@ const char* errorName(Error e);
 
 // Tries to join within deadlineMs (a budget measured from the call, not an
 // absolute time). Returns the joined SSID or a failure code.
-Result joinAnySaved(WifiPort& port, uint32_t deadlineMs);
+//
+// `scanFirst` skips the blind attempt on the last-connected SSID: the scan runs
+// first and only saved networks it found are tried (the last-connected one
+// first, then by signal). With nothing in range this fails after one scan
+// instead of after kPerNetworkTimeoutMs plus a scan. A hidden network is never
+// found by a scan, so it is not joined in this mode.
+Result joinAnySaved(WifiPort& port, uint32_t deadlineMs, bool scanFirst = false);
 
 #ifdef ARDUINO
 // Device entry point: adapts Arduino WiFi + WIFI_STORE; records the joined SSID
 // as last-connected (not persisted to disk here).
-Result joinAnySaved(uint32_t deadlineMs);
+Result joinAnySaved(uint32_t deadlineMs, bool scanFirst = false);
 #endif
 
 }  // namespace xteink::wifijoin

@@ -266,6 +266,11 @@ been proven on the X3, so only an offer from the LAN origin is installed. The
 tunnel is still asked for the offer, so a pending update can be shown. Enable
 it with `-DXTEINK_OTA_TUNNEL=1` once a hardware run proves the download.
 
+The `gh_release_rc` env in this tree sets it to 1: its reader is provisioned
+with an https origin only, so with the flag off no offer could ever be
+installed. The download itself is still unproven on hardware. A failed or
+unreachable image is rolled back by the post-update health check.
+
 ### Install
 
 The image is fetched from the offer's `url`, resolved against the origin that

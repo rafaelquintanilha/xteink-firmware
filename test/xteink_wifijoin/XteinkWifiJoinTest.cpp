@@ -127,3 +127,70 @@ TEST(WifiJoin, AllAttemptsFailReportsJoinFailed) {
   p.visible = {{"office", -60}};
   EXPECT_EQ(joinAnySaved(p, 60000).error, Error::JoinFailed);
 }
+
+// --- scanFirst (the X4 wake check) ---------------------------------------------
+
+TEST(WifiJoinScanFirst, NothingInRangeCostsOneScanAndNoAttempt) {
+  FakePort p;
+  p.last = "home";
+  p.saved = {{"home", "a"}, {"office", "b"}};
+  p.visible = {{"stranger", -50}};
+  const uint32_t t0 = p.now;
+  EXPECT_EQ(joinAnySaved(p, 20000, true).error, Error::NoneInRange);
+  EXPECT_TRUE(p.beginCalls.empty());
+  EXPECT_EQ(p.now - t0, p.scanCostMs);
+}
+
+TEST(WifiJoinScanFirst, LastNetworkGoesFirstWhenInRange) {
+  FakePort p;
+  p.last = "home";
+  p.saved = {{"home", "a"}, {"strong", "c"}};
+  p.visible = {{"strong", -40}, {"home", -75}};
+  p.accepts = {{"home", true}, {"strong", true}};
+  const auto r = joinAnySaved(p, 30000, true);
+  EXPECT_EQ(r.ssid, "home");
+  ASSERT_EQ(p.beginCalls.size(), 1u);
+  EXPECT_EQ(p.beginCalls[0], "home");
+}
+
+TEST(WifiJoinScanFirst, LastOutOfRangeIsNotTried) {
+  FakePort p;
+  p.last = "home";
+  p.saved = {{"home", "a"}, {"office", "b"}};
+  p.visible = {{"office", -60}, {"other", -40}};
+  p.accepts = {{"office", true}};
+  const auto r = joinAnySaved(p, 30000, true);
+  EXPECT_EQ(r.ssid, "office");
+  ASSERT_EQ(p.beginCalls.size(), 1u);
+  EXPECT_EQ(p.beginCalls[0], "office");
+}
+
+TEST(WifiJoinScanFirst, FallsBackBySignalAndTriesEachNetworkOnce) {
+  FakePort p;
+  p.last = "home";
+  p.saved = {{"home", "a"}, {"weak", "b"}, {"strong", "c"}};
+  p.visible = {{"weak", -80}, {"home", -30}, {"strong", -50}, {"home", -60}};
+  p.accepts = {{"weak", true}};
+  const auto r = joinAnySaved(p, 60000, true);
+  EXPECT_EQ(r.ssid, "weak");
+  ASSERT_EQ(p.beginCalls.size(), 3u);
+  EXPECT_EQ(p.beginCalls[0], "home");
+  EXPECT_EQ(p.beginCalls[1], "strong");
+  EXPECT_EQ(p.beginCalls[2], "weak");
+}
+
+TEST(WifiJoinScanFirst, InRangeButRefusedReportsJoinFailed) {
+  FakePort p;
+  p.last = "home";
+  p.saved = {{"home", "a"}};
+  p.visible = {{"home", -60}};
+  EXPECT_EQ(joinAnySaved(p, 60000, true).error, Error::JoinFailed);
+}
+
+TEST(WifiJoinScanFirst, NoLastNetworkStillJoinsBySignal) {
+  FakePort p;
+  p.saved = {{"office", "b"}};
+  p.visible = {{"office", -60}};
+  p.accepts = {{"office", true}};
+  EXPECT_EQ(joinAnySaved(p, 30000, true).ssid, "office");
+}

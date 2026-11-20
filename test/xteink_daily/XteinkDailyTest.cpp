@@ -108,8 +108,12 @@ class FakePort : public RoutinePort {
 
   // Observations.
   std::vector<std::string> events;
-  int joinCalls = 0;
-  int syncCalls = 0;
+  int joinCalls = 0;       // blind-first joins (joinWifi)
+  int rangeJoinCalls = 0;  // scan-first joins (joinWifiInRange)
+  int syncCalls = 0;       // every sync, quick or full
+  int quickSyncCalls = 0;
+  bool rtcPresent = true;  // false: the original X4
+  int clockStages = 0;
   int installCalls = 0;
   int checkCalls = 0;
   int sntpCalls = 0;
@@ -176,9 +180,21 @@ class FakePort : public RoutinePort {
     connected = joinOk;
     return joinOk;
   }
+  bool joinWifiInRange(const uint32_t budgetMs) override {
+    ++rangeJoinCalls;
+    events.push_back("join-scan");
+    now += (joinCostMs < budgetMs || !joinHonorsBudget) ? joinCostMs : budgetMs;
+    connected = joinOk;
+    return joinOk;
+  }
   void wifiOff() override {
     connected = false;
     events.push_back("wifi-off");
+  }
+  bool hasRtc() override { return rtcPresent; }
+  void showStage(const Stage stage) override {
+    if (stage == Stage::WakeCheck) events.push_back("stage:wake-check");
+    if (stage == Stage::Clock) ++clockStages;  // counted apart: the upstream tests index `events`
   }
   int64_t lastRun() override { return lastRunValue; }
   void setLastRun(const int64_t epoch) override {
@@ -227,6 +243,11 @@ class FakePort : public RoutinePort {
     now += syncCostMs < hardBudgetMs ? syncCostMs : hardBudgetMs;
     return syncResult;
   }
+  sync::Outcome runQuickSync(const sync::RunFields& fields, const uint32_t itemBudgetMs,
+                             const uint32_t hardBudgetMs) override {
+    ++quickSyncCalls;
+    return runSync(fields, itemBudgetMs, hardBudgetMs);
+  }
 
   // A trusted system clock at `epoch` (deep-sleep wake).
   void clockAt(const int64_t epoch) {
@@ -240,6 +261,7 @@ class FakePort : public RoutinePort {
     rebooted = false;
     events.clear();
     joinCalls = syncCalls = installCalls = checkCalls = sntpCalls = setLastRunCalls = 0;
+    rangeJoinCalls = quickSyncCalls = clockStages = 0;
     sntpWaits = rtcWrites = 0;
     startMs = now;
   }
@@ -329,6 +351,226 @@ TEST_P(DailyDstTest, SecondStartOnTheSameLocalDayRunsNoRoutine) {
   EXPECT_EQ(run(p, Trigger::PowerOn).status, Status::NotDue) << d.name;
   p.nextBoot(nextBoundary);
   EXPECT_EQ(run(p, Trigger::PowerOn).status, Status::Ran) << d.name;
+}
+
+TEST(DailyWakeInbox, PicksUpLaterItemsWithoutRepeatingDailyMaintenance) {
+  FakePort p = dueDevice();
+  ASSERT_EQ(run(p, Trigger::PowerOn, true).status, Status::Ran);
+  ASSERT_EQ(p.syncCalls, 1);
+  const auto firstRun = p.lastRunValue;
+  p.nextBoot(firstRun + kHour);
+  p.joinOk = false;
+  EXPECT_EQ(run(p, Trigger::Wake, true).status, Status::SkippedNoWifi);
+  EXPECT_EQ(p.syncCalls, 0);
+  p.nextBoot(firstRun + 2 * kHour);
+  p.joinOk = true;
+  EXPECT_EQ(run(p, Trigger::Wake, true).status, Status::Ran);
+  EXPECT_EQ(p.syncCalls, 1);
+  EXPECT_EQ(p.checkCalls, 0);
+  EXPECT_EQ(p.installCalls, 0);
+  EXPECT_EQ(p.setLastRunCalls, 0);
+  EXPECT_EQ(p.lastRunValue, firstRun);
+  EXPECT_FALSE(p.connected);
+  p.nextBoot(firstRun + 3 * kHour);
+  p.battery = kDailyJoinBatteryFloor - 1;
+  EXPECT_EQ(run(p, Trigger::Wake, true).status, Status::SkippedLowBattery);
+  EXPECT_EQ(p.joinCalls, 0);
+  EXPECT_EQ(p.rangeJoinCalls, 0);
+}
+
+// A failed join costs one scan, and the next wake tries again: there is no
+// interval, because a board without an RTC could not measure one.
+TEST(DailyWakeInbox, FailedJoinIsRetriedOnTheNextWake) {
+  FakePort p = dueDevice();
+  p.joinOk = false;
+  const int64_t t0 = p.systemClock;
+  EXPECT_EQ(run(p, Trigger::Wake, true).status, Status::SkippedNoWifi);
+  EXPECT_EQ(p.rangeJoinCalls, 1);
+  EXPECT_EQ(p.joinCalls, 0);
+  EXPECT_EQ(p.setLastRunCalls, 0);
+
+  // Back in range a minute later: the daily routine runs in full.
+  p.nextBoot(t0 + 60);
+  p.joinOk = true;
+  EXPECT_EQ(run(p, Trigger::Wake, true).status, Status::Ran);
+  EXPECT_EQ(p.checkCalls, 1);
+  EXPECT_EQ(p.syncCalls, 1);
+  EXPECT_EQ(p.quickSyncCalls, 0);
+  EXPECT_EQ(p.setLastRunCalls, 1);
+
+  // And a minute after that it checks for content again, without the daily part.
+  p.nextBoot(t0 + 120);
+  EXPECT_EQ(run(p, Trigger::Wake, true).status, Status::Ran);
+  EXPECT_EQ(p.checkCalls, 0);
+  EXPECT_EQ(p.quickSyncCalls, 1);
+}
+
+TEST(DailyWakeInbox, ShowsBusyThenScansBeforeJoining) {
+  FakePort p = dueDevice();
+  ASSERT_EQ(run(p, Trigger::Wake, true).status, Status::Ran);
+  p.nextBoot(p.lastRunValue + kHour);
+  ASSERT_EQ(run(p, Trigger::Wake, true).status, Status::Ran);
+  ASSERT_GE(p.events.size(), 3u);
+  EXPECT_EQ(p.events[0], "stage:wake-check");
+  EXPECT_EQ(p.events[1], "join-scan");
+  EXPECT_EQ(p.events[2], "sync");
+  EXPECT_EQ(p.joinCalls, 0);  // never the blind attempt on the last network
+}
+
+TEST(DailyWakeInbox, OnlyTheDailyRunRehashesTheInventory) {
+  FakePort p = dueDevice();
+  ASSERT_EQ(run(p, Trigger::Wake, true).status, Status::Ran);
+  EXPECT_EQ(p.syncCalls, 1);
+  EXPECT_EQ(p.quickSyncCalls, 0);
+
+  p.nextBoot(p.lastRunValue + kHour);
+  ASSERT_EQ(run(p, Trigger::Wake, true).status, Status::Ran);
+  EXPECT_EQ(p.syncCalls, 1);
+  EXPECT_EQ(p.quickSyncCalls, 1);
+}
+
+TEST(DailyWakeInbox, LowBatteryUsesNoRadioAndOnlyTheDailyRunLeavesANote) {
+  FakePort p = dueDevice();
+  p.battery = kDailyJoinBatteryFloor - 1;
+  EXPECT_EQ(run(p, Trigger::Wake, true).status, Status::SkippedLowBattery);
+  EXPECT_EQ(p.savedNote, Note::LowBattery);  // the daily sync was due
+  EXPECT_TRUE(p.events.empty());
+
+  p.nextBoot(p.systemClock + 60);
+  p.battery = 90;
+  ASSERT_EQ(run(p, Trigger::Wake, true).status, Status::Ran);
+  p.savedNote = Note::None;
+
+  p.nextBoot(p.lastRunValue + kHour);
+  p.battery = kDailyJoinBatteryFloor - 1;
+  EXPECT_EQ(run(p, Trigger::Wake, true).status, Status::SkippedLowBattery);
+  EXPECT_EQ(p.savedNote, Note::None);
+  EXPECT_TRUE(p.events.empty());
+}
+
+// Every other start (an X3, or an X4 plain boot) keeps the upstream routine.
+TEST(DailyWakeInbox, WithoutTheWakeCheckTheRoutineIsUnchanged) {
+  FakePort p = dueDevice();
+  ASSERT_EQ(run(p, Trigger::PowerOn).status, Status::Ran);
+  EXPECT_EQ(p.joinCalls, 1);
+  EXPECT_EQ(p.rangeJoinCalls, 0);
+  EXPECT_EQ(p.quickSyncCalls, 0);
+
+  p.nextBoot(p.lastRunValue + kHour);
+  EXPECT_EQ(run(p, Trigger::Wake).status, Status::NotDue);
+  EXPECT_TRUE(p.events.empty());
+}
+
+// --- the original X4: no RTC, powered off while asleep, so no clock at the start ------
+
+// A cold start as the X4 makes it on battery: nothing to tell the time by.
+FakePort x4ColdStart(const int64_t networkTime) {
+  FakePort p;
+  p.rtcPresent = false;
+  p.bootClock = 0;
+  p.systemClock = 0;
+  p.rtc = 0;
+  p.sntp = networkTime;
+  p.sntpDone = false;
+  return p;
+}
+
+TEST(DailyX4, WakeCheckGetsTheTimeFromTheNetworkAndRunsTheDailyPartWhenDue) {
+  const int64_t now = utc(2026, 10, 11, 5, 0, 0);
+  FakePort p = x4ColdStart(now);
+  p.lastRunValue = utc(2026, 10, 10, 4, 0, 0);
+  const Result r = run(p, Trigger::PowerOn, true);
+  EXPECT_EQ(r.status, Status::Ran);
+  EXPECT_EQ(r.clock, ClockSource::Network);
+  EXPECT_EQ(p.clockStages, 1);  // "Contacting server..." before the radio comes up
+  ASSERT_GE(p.events.size(), 4u);
+  EXPECT_EQ(p.events[0], "join-scan");  // scan first here too: never the blind attempt
+  EXPECT_EQ(p.events[1], "sntp");
+  EXPECT_EQ(p.events[2], "check");
+  EXPECT_EQ(p.events[3], "sync");
+  EXPECT_EQ(p.joinCalls, 0);
+  EXPECT_EQ(p.rangeJoinCalls, 1);  // one join serves the clock and the sync
+  EXPECT_EQ(p.quickSyncCalls, 0);
+  EXPECT_EQ(p.lastRunValue, now);
+  EXPECT_EQ(p.syncFields.startedAt, isoUtc(now));
+  EXPECT_EQ(p.rtcWrites, 0);
+  EXPECT_EQ(p.sntpWaits, 0);
+  EXPECT_FALSE(p.connected);
+}
+
+TEST(DailyX4, WakeCheckBetweenDailyRunsIsTheQuickSync) {
+  const int64_t now = utc(2026, 10, 11, 9, 0, 0);
+  FakePort p = x4ColdStart(now);
+  p.lastRunValue = utc(2026, 10, 11, 5, 0, 0);  // already ran this routine-day
+  EXPECT_EQ(run(p, Trigger::PowerOn, true).status, Status::Ran);
+  EXPECT_EQ(p.checkCalls, 0);
+  EXPECT_EQ(p.syncCalls, 1);
+  EXPECT_EQ(p.quickSyncCalls, 1);
+  EXPECT_EQ(p.setLastRunCalls, 0);
+}
+
+// SNTP blocked or slow: new content must still arrive. Only the daily part,
+// which needs the date, is left for a later start.
+TEST(DailyX4, WakeCheckStillSyncsWhenTheTimeCannotBeHad) {
+  FakePort p = x4ColdStart(0);
+  p.lastRunValue = utc(2026, 10, 10, 4, 0, 0);
+  const Result r = run(p, Trigger::PowerOn, true);
+  EXPECT_EQ(r.status, Status::Ran);
+  EXPECT_EQ(r.clock, ClockSource::None);
+  EXPECT_EQ(p.rangeJoinCalls, 1);
+  EXPECT_EQ(p.sntpCalls, 1);
+  EXPECT_EQ(p.checkCalls, 0);
+  EXPECT_EQ(p.installCalls, 0);
+  EXPECT_EQ(p.quickSyncCalls, 1);
+  EXPECT_EQ(p.setLastRunCalls, 0);
+  EXPECT_TRUE(p.syncFields.startedAt.empty());  // no date to report
+  EXPECT_EQ(p.syncFields.trigger, "power_on");
+  EXPECT_EQ(p.sntpWaits, 0);  // no RTC to set: nothing to wait for
+  EXPECT_FALSE(p.connected);
+}
+
+TEST(DailyX4, WakeCheckAwayFromWifiEndsAfterTheScan) {
+  FakePort p = x4ColdStart(utc(2026, 10, 11, 5, 0, 0));
+  p.joinOk = false;
+  EXPECT_EQ(run(p, Trigger::PowerOn, true).status, Status::SkippedNoWifi);
+  EXPECT_EQ(p.rangeJoinCalls, 1);
+  EXPECT_EQ(p.joinCalls, 0);
+  EXPECT_EQ(p.sntpCalls, 0);
+  EXPECT_EQ(p.syncCalls, 0);
+}
+
+TEST(DailyX4, WakeCheckOnLowBatteryUsesNoRadio) {
+  FakePort p = x4ColdStart(utc(2026, 10, 11, 5, 0, 0));
+  p.battery = kDailyJoinBatteryFloor - 1;
+  EXPECT_EQ(run(p, Trigger::PowerOn, true).status, Status::SkippedLowBattery);
+  EXPECT_TRUE(p.events.empty());
+  EXPECT_EQ(p.savedNote, Note::None);
+}
+
+// The X3 has an RTC, so a full run still waits for a late SNTP answer to set it.
+TEST(DailyX4, OnlyABoardWithAnRtcWaitsForALateSntpAnswer) {
+  FakePort x3 = dueDevice();
+  x3.sntpDone = false;
+  x3.sntpAnswersAfterMs = 1000;
+  ASSERT_EQ(run(x3, Trigger::PowerOn).status, Status::Ran);
+  EXPECT_EQ(x3.sntpWaits, 1);
+
+  FakePort x4 = dueDevice();  // on USB power the X4 keeps its clock through sleep
+  x4.rtcPresent = false;
+  x4.sntpDone = false;
+  x4.sntpAnswersAfterMs = 1000;
+  ASSERT_EQ(run(x4, Trigger::Wake, true).status, Status::Ran);
+  EXPECT_EQ(x4.sntpWaits, 0);
+  EXPECT_EQ(x4.rtcWrites, 0);
+}
+
+// Without the wake check a start with no clock keeps the upstream behaviour.
+TEST(DailyX4, AStartWithoutTheWakeCheckStillFailsClosedWithoutAClock) {
+  FakePort p = x4ColdStart(0);
+  EXPECT_EQ(run(p, Trigger::PowerOn).status, Status::SkippedNoClock);
+  EXPECT_EQ(p.joinCalls, 1);
+  EXPECT_EQ(p.rangeJoinCalls, 0);
+  EXPECT_EQ(p.syncCalls, 0);
 }
 
 INSTANTIATE_TEST_SUITE_P(Jerusalem, DailyDstTest,

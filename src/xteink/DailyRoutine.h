@@ -16,6 +16,16 @@
 // The whole routine runs under one hard wall-clock cap and never waits for a
 // button.
 //
+// The original X4 has no RTC and is powered off while asleep on battery, so a
+// power-button start there usually has no clock and cannot tell how long the
+// device slept. Its starts follow WakePolicy instead of the clock alone:
+//   - a start that resumes a book does nothing here: no radio, no wait;
+//   - a start that opens Home checks for new content first ("wake check"),
+//     whether or not the daily maintenance is due. The join scans first and
+//     tries only saved networks in range, the check goes on without a clock
+//     when SNTP does not answer, and between daily runs the sync skips the
+//     inventory re-hash (XteinkSync.h).
+//
 // The clock is self-validated on every start: the system clock or the RTC is
 // trusted only when it is plausible (not near epoch 0, not behind the
 // persisted TrustedTime floor); otherwise Wi-Fi + SNTP establish it first. If
@@ -66,6 +76,9 @@ constexpr uint32_t kSyncReserveMs = 35000;     // kept for the book sync after O
 // kSyncReserveMs leaves about 65 s.
 constexpr uint32_t kOtaMinInstallMs = 60000;
 constexpr uint32_t kSyncTailMs = 10000;  // no new download starts in the last 10 s
+// Wake check: SNTP gets this long when the start has no clock. Enough for an
+// answer on a working network; the content check does not depend on it.
+constexpr uint32_t kWakeClockBudgetMs = 3000;
 
 // Below this the clock was obviously never set (2025-01-01 UTC); the same
 // floor TrustedTime uses.
@@ -174,7 +187,7 @@ struct OtaCheck {
   sync::Error error = sync::Error::None;  // != None: the check itself failed
 };
 
-enum class Stage : uint8_t { Clock, CheckingFirmware, InstallingFirmware, Syncing };
+enum class Stage : uint8_t { Clock, CheckingFirmware, InstallingFirmware, Syncing, WakeCheck };
 
 // Everything the routine needs from the device.
 class RoutinePort {
@@ -202,10 +215,16 @@ class RoutinePort {
   // Writes a UTC epoch to the board's RTC (HalClock::setUtc: no TZ change).
   // False when there is no RTC or the write failed.
   virtual bool writeRtc(int64_t epoch) = 0;
+  // The board has an RTC to write. Without one, no run waits for a late SNTP
+  // answer.
+  virtual bool hasRtc() { return true; }
 
   // Network.
   virtual bool wifiConnected() = 0;
   virtual bool joinWifi(uint32_t budgetMs) = 0;
+  // The wake check's join: scan first, then only saved networks in range
+  // (wifijoin::joinAnySaved with scanFirst).
+  virtual bool joinWifiInRange(uint32_t budgetMs) { return joinWifi(budgetMs); }
   virtual void wifiOff() = 0;
 
   // NVS (namespace "xteink").
@@ -229,6 +248,11 @@ class RoutinePort {
   virtual sync::Error installOta(uint32_t budgetMs) = 0;
   virtual void reboot() = 0;  // does not return on the device
   virtual sync::Outcome runSync(const sync::RunFields& fields, uint32_t itemBudgetMs, uint32_t hardBudgetMs) = 0;
+  // The same sync without the inventory re-hash (XteinkSync::run, quickInventory):
+  // a wake check between two daily runs.
+  virtual sync::Outcome runQuickSync(const sync::RunFields& fields, uint32_t itemBudgetMs, uint32_t hardBudgetMs) {
+    return runSync(fields, itemBudgetMs, hardBudgetMs);
+  }
 
   // Non-blocking progress popup; never waits for input.
   virtual void showStage(Stage stage) { (void)stage; }
@@ -261,14 +285,22 @@ struct Result {
 // Runs the whole routine against `port`. Never waits on button input. The
 // only caller is setup(), before activity routing, so no book can be open
 // while it runs (there is no reader check: it could never be true there).
-Result run(RoutinePort& port, Trigger trigger);
+// `checkInbox` selects the wake check described at the top of this file.
+Result run(RoutinePort& port, Trigger trigger, bool checkInbox = false);
+
+// What a start does here (decided in setup(), see the top of this file).
+enum class WakePolicy : uint8_t {
+  Daily,       // the once-a-day routine, when it is due
+  CheckInbox,  // the wake check: the daily routine when due, and the content check either way
+  Skip,        // nothing: the start resumes a book
+};
 
 #ifdef ARDUINO
 // Device entry from setup(), after the OTA health check and before activity
 // routing. `bootClockEpoch` is time(nullptr) captured before
 // trustedtime::init(); `deepSleepWake` selects run_trigger "wake".
 void onBoot(GfxRenderer& renderer, BootKind kind, bool silentReboot, bool panicReboot, bool recoveryMode,
-            bool deepSleepWake, int64_t bootClockEpoch);
+            bool deepSleepWake, int64_t bootClockEpoch, WakePolicy policy);
 
 // Note for the Home status line (cached; safe from the render task).
 Note homeNote();

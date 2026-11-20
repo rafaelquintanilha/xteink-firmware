@@ -129,20 +129,12 @@ TEST(XteinkSyncQueue, AbsentUnknownOrNonStringKindIsBook) {
   EXPECT_EQ(kindOf(R"("kind":["article"])"), ItemKind::Book);
 }
 
-TEST(XteinkSyncKind, EveryFolderIsUnderTheBooksDir) {
-  const std::string root = kBooksDir;
-  EXPECT_EQ(kindFolder(ItemKind::Book), root);
-  for (const ItemKind k : {ItemKind::Article, ItemKind::Transcript, ItemKind::Newspaper}) {
-    EXPECT_EQ(std::string(kindFolder(k)).rfind(root + "/", 0), 0u) << kindFolder(k);
-  }
-}
-
 TEST(XteinkSyncKind, FolderPerKind) {
-  EXPECT_STREQ(kindFolder(ItemKind::Book), "/xteink");
-  EXPECT_STREQ(kindFolder(ItemKind::Article), "/xteink/articles");
+  EXPECT_STREQ(kindFolder(ItemKind::Book), "/Books");
+  EXPECT_STREQ(kindFolder(ItemKind::Article), "/Articles");
   EXPECT_STREQ(kindFolder(ItemKind::Transcript), "/xteink/transcripts");
   EXPECT_STREQ(kindFolder(ItemKind::Newspaper), "/xteink/newspapers");
-  EXPECT_STREQ(kindFolder(static_cast<ItemKind>(99)), "/xteink");  // unknown -> book folder
+  EXPECT_STREQ(kindFolder(static_cast<ItemKind>(99)), "/Books");  // unknown -> book folder
 }
 
 TEST(XteinkSyncQueue, EmptyQueue) {
@@ -211,11 +203,10 @@ TEST(XteinkSyncQueue, RootRelativePath) {
 
 // --- server order (decision c60) -------------------------------------------
 
-TEST(XteinkSyncOrder, DefaultsWhenUnprovisioned) {
-  const auto o = serverOrder("", "");
-  ASSERT_EQ(o.size(), 2u);
-  EXPECT_EQ(o[0], "http://xteink.local:8781");
-  EXPECT_EQ(o[1], "https://xteink.culture.dev");
+TEST(XteinkSyncOrder, ContactsOnlyProvisionedOrigins) {
+  EXPECT_TRUE(serverOrder("", "").empty());
+  EXPECT_EQ(serverOrder("http://reader.lan:8781", ""), std::vector<std::string>{"http://reader.lan:8781"});
+  EXPECT_EQ(serverOrder("", "https://books.example.org"), std::vector<std::string>{"https://books.example.org"});
 }
 
 TEST(XteinkSyncOrder, ProvisionedLanFirstThenTunnel) {
@@ -232,7 +223,7 @@ TEST(XteinkSyncOrder, TunnelMustBeHttps) {
 }
 
 TEST(XteinkSyncOrder, DropsBadAndDuplicateEntries) {
-  EXPECT_EQ(serverOrder("ftp://x", "").size(), 1u);
+  EXPECT_TRUE(serverOrder("ftp://x", "").empty());
   const auto dup = serverOrder("https://xteink.culture.dev:443", "https://xteink.culture.dev");
   ASSERT_EQ(dup.size(), 1u);
   EXPECT_EQ(dup[0], "https://xteink.culture.dev");

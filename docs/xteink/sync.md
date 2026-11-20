@@ -37,12 +37,12 @@ Upstream files get only small hooks:
    /api/device/status` with `free_sd_bytes`, `firmware_version`, the previous
    `last_sync_result` and `last_error`, and the inventory. It tries each server
    in this order (decision c60):
-   1. The provisioned LAN URL, or `http://xteink.local:8781` when none is set.
+   1. The configured LAN URL, if present.
       This attempt uses a 4 s timeout. `.local` names resolve through lwIP's
       built-in mDNS query support (`CONFIG_LWIP_DNS_SUPPORT_MDNS_QUERIES=y` in
       the framework sdkconfig). That only sends a query and starts no mDNS
       responder, so the no-open-services guard is unaffected.
-   2. The provisioned tunnel URL, or `https://xteink.culture.dev`. It must be
+   2. The configured tunnel URL, if present. It must be
       https, verified against the pinned roots (`docs/xteink/tls.md`).
 
    The first server that returns any HTTP status is used for the rest of the
@@ -56,7 +56,7 @@ Upstream files get only small hooks:
      (freeink `fetchResumable`). A `416` discards the partial bytes and starts
      again from 0, once.
    - Once the size and sha256 match, the file is renamed into its kind folder:
-     books into `/xteink/`, articles into `/xteink/articles`, transcripts into
+     books into `/Books`, articles into `/Articles`, transcripts into
      `/xteink/transcripts` and newspapers into `/xteink/newspapers`. The
      folder is created when missing. Files delivered earlier stay where they
      are; nothing already on the card is moved. The client never overwrites a
@@ -124,7 +124,7 @@ continues. `E401`, `E426`, `ENET` and `ELOWMEM` stop the sync.
   The sync shows a "Syncing books..." popup. After 60 s it stops starting new
   items and leaves the rest for the next sync.
 
-- **Daily routine** (see below), once per day on a power-on or wake.
+- **Daily routine** (see below), once per day on a power-on or wake. On the original X4, a power-button start that opens Home also checks for new content (the wake check, below); one that resumes a book does not use the network.
 
 The sync runs on the main loop task. That is the simplest safe option on the
 single-core C3: there is no second task holding a TLS session and no shared
@@ -179,6 +179,37 @@ off when it returns, whether or not the routine ran.
 2. **Gate.** The routine runs when NVS `xteink` / `last_run` is earlier than
    the most recent 06:00 local time. The timezone is the clock's. When none was
    ever chosen (the shipped default is UTC), Asia/Jerusalem is used.
+   The original X4 has no RTC and is powered off while asleep on battery, so
+   a power-button start there usually has no clock and cannot tell how long
+   the device slept. Its power-button starts follow `WakePolicy` (decided in
+   `setup()`):
+   - **A start that resumes a book does nothing here**: no radio, no wait.
+     Holding Back while pressing power opens Home instead, as upstream.
+   - **A start that opens Home checks for new content first** (the **wake
+     check**), whether or not the daily maintenance is due:
+     - "Contacting server..." is shown before the join, because the retained
+       sleep image is still on the panel.
+     - The join scans first and tries only saved networks it found, the
+       last-connected one first (`wifijoin::joinAnySaved`, `scanFirst`). With
+       none in range it ends after one scan, not after an 8 s attempt on the
+       last network. A hidden network is not joined this way.
+     - With no clock, SNTP gets `kWakeClockBudgetMs` (3 s). When it answers,
+       the 06:00 gate applies as usual and a due daily run happens in the same
+       start. When it does not, the content check still runs; only the daily
+       part (firmware check, `last_run`) waits for a later start.
+     - Between daily runs the sync skips the inventory re-hash (`sync::run`,
+       `quickInventory`). Delivered files still on the card are reported as
+       delivered. A file is hashed only where the result decides something:
+       an item the manifest says is already on the card, a name clash before
+       a replace, and a delete. The daily run still re-hashes everything.
+     - Below the battery floor nothing is tried, and the Home note is left
+       alone unless the daily run was due.
+   - A board without an RTC never waits for a late SNTP answer at the end of a
+     run: there is no RTC to set.
+
+   Home also has a **Sync books now** row on a provisioned device (every home
+   layout except the cover grid). It starts the same manual sync as
+   Settings > System.
 3. **Battery.** Below `kDailyJoinBatteryFloor` (20 %) the routine is skipped,
    `last_run` is not written, and Home shows "Low battery: daily sync skipped".
 4. **Wi-Fi.** `wifijoin::joinAnySaved()` within `kJoinBudgetMs` (20 s). If no

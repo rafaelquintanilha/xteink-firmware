@@ -13,6 +13,7 @@ struct FakePort : WifiPort {
   std::vector<ScanResult> visible;      // returned by scan()
   std::map<std::string, bool> accepts;  // ssid -> join works
   std::vector<std::string> beginCalls;
+  std::vector<int32_t> beginChannels;
   uint32_t now = 1000;
   uint32_t scanCostMs = 2000;
   std::string pending;
@@ -29,8 +30,9 @@ struct FakePort : WifiPort {
     now += std::min(scanCostMs, maxMs);
     return visible;
   }
-  void begin(const std::string& s, const std::string&) override {
+  void begin(const std::string& s, const std::string&, const int32_t channel) override {
     beginCalls.push_back(s);
+    beginChannels.push_back(channel);
     pending = s;
     up = false;
   }
@@ -193,4 +195,28 @@ TEST(WifiJoinScanFirst, NoLastNetworkStillJoinsBySignal) {
   p.visible = {{"office", -60}};
   p.accepts = {{"office", true}};
   EXPECT_EQ(joinAnySaved(p, 30000, true).ssid, "office");
+}
+
+TEST(WifiJoinChannel, ScannedJoinUsesTheStrongestAccessPointsChannel) {
+  FakePort p;
+  p.last = "home";
+  p.saved = {{"home", "a"}};
+  // Two access points for one SSID (a mesh): the stronger one's channel wins.
+  p.visible = {{"home", -70, 1}, {"home", -40, 11}};
+  p.accepts = {{"home", true}};
+  EXPECT_EQ(joinAnySaved(p, 30000, true).ssid, "home");
+  ASSERT_EQ(p.beginChannels.size(), 1u);
+  EXPECT_EQ(p.beginChannels[0], 11);
+}
+
+TEST(WifiJoinChannel, BlindAttemptLeavesTheChannelToTheDriver) {
+  FakePort p;
+  p.last = "home";
+  p.saved = {{"home", "a"}, {"office", "b"}};
+  p.visible = {{"office", -60, 6}};
+  p.accepts = {{"office", true}};
+  EXPECT_EQ(joinAnySaved(p, 30000).ssid, "office");
+  ASSERT_EQ(p.beginChannels.size(), 2u);
+  EXPECT_EQ(p.beginChannels[0], 0);  // home, tried before any scan
+  EXPECT_EQ(p.beginChannels[1], 6);
 }

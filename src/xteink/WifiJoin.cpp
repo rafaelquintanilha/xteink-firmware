@@ -32,12 +32,12 @@ uint32_t remaining(uint32_t start, uint32_t budget, uint32_t now) {
 
 enum class Attempt { Joined, Failed, OutOfTime };
 
-Attempt tryJoin(WifiPort& port, const Credential& cred, uint32_t start, uint32_t budget) {
+Attempt tryJoin(WifiPort& port, const Credential& cred, const int32_t channel, uint32_t start, uint32_t budget) {
   uint32_t left = remaining(start, budget, port.millis());
   if (left == 0) return Attempt::OutOfTime;
   const uint32_t limit = std::min(left, kPerNetworkTimeoutMs);
   const uint32_t attemptStart = port.millis();
-  port.begin(cred.ssid, cred.password);
+  port.begin(cred.ssid, cred.password, channel);
   while (!port.connected()) {
     if (expired(start, budget, port.millis())) {
       port.disconnect();
@@ -66,7 +66,7 @@ Result joinAnySaved(WifiPort& port, uint32_t deadlineMs, const bool scanFirst) {
   if (!scanFirst && !last.empty()) {
     if (const auto cred = port.findCredential(last)) {
       anyInRange = true;  // attempted blindly; refined by the scan below
-      switch (tryJoin(port, *cred, start, deadlineMs)) {
+      switch (tryJoin(port, *cred, 0, start, deadlineMs)) {
         case Attempt::Joined:
           return {Error::None, cred->ssid};
         case Attempt::OutOfTime:
@@ -101,7 +101,8 @@ Result joinAnySaved(WifiPort& port, uint32_t deadlineMs, const bool scanFirst) {
     if (!cred) continue;
     sawSaved = true;
     tried.push_back(r.ssid);
-    switch (tryJoin(port, *cred, start, deadlineMs)) {
+    // Sorted by signal, so this is the strongest access point for the SSID.
+    switch (tryJoin(port, *cred, r.channel, start, deadlineMs)) {
       case Attempt::Joined:
         return {Error::None, cred->ssid};
       case Attempt::OutOfTime:
@@ -119,6 +120,7 @@ Result joinAnySaved(WifiPort& port, uint32_t deadlineMs, const bool scanFirst) {
 
 #ifdef ARDUINO
 #include <Arduino.h>
+#include <Logging.h>
 #include <WiFi.h>
 
 #include "WifiCredentialStore.h"
@@ -126,6 +128,11 @@ Result joinAnySaved(WifiPort& port, uint32_t deadlineMs, const bool scanFirst) {
 namespace xteink::wifijoin {
 
 namespace {
+// Active-scan dwell per channel. Arduino's default (300 ms) puts a 13-channel
+// scan near 4 s; ESP-IDF's own default is 120 ms, and a nearby access point
+// answers a probe request well inside it.
+constexpr uint32_t kScanMsPerChannel = 120;
+
 class ArduinoPort : public WifiPort {
  public:
   std::string lastConnectedSsid() override { return WIFI_STORE.getLastConnectedSsid(); }
@@ -140,7 +147,7 @@ class ArduinoPort : public WifiPort {
     WiFi.mode(WIFI_STA);
     WiFi.scanDelete();
     // Async scan so the hard deadline is honoured.
-    WiFi.scanNetworks(true);
+    WiFi.scanNetworks(/*async=*/true, /*show_hidden=*/false, /*passive=*/false, kScanMsPerChannel);
     const uint32_t t0 = ::millis();
     int n = WiFi.scanComplete();
     while (n == WIFI_SCAN_RUNNING && static_cast<uint32_t>(::millis() - t0) < maxMs) {
@@ -148,14 +155,19 @@ class ArduinoPort : public WifiPort {
       n = WiFi.scanComplete();
     }
     if (n > 0) {
-      for (int i = 0; i < n; i++) out.push_back({WiFi.SSID(i).c_str(), WiFi.RSSI(i)});
+      out.reserve(static_cast<size_t>(n));
+      for (int i = 0; i < n; i++) out.push_back({WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.channel(i)});
     }
     WiFi.scanDelete();
+    const auto ms = static_cast<unsigned long>(::millis() - t0);
+    LOG_INF("WIFI", "Scan: %d networks in %lu ms", n, ms);
     return out;
   }
-  void begin(const std::string& ssid, const std::string& password) override {
+  void begin(const std::string& ssid, const std::string& password, const int32_t channel) override {
     WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid.c_str(), password.c_str());
+    // A known channel: the driver's connect scan starts there (WIFI_FAST_SCAN
+    // stops at the first match) instead of sweeping from channel 1.
+    WiFi.begin(ssid.c_str(), password.c_str(), channel);
   }
   bool connected() override { return WiFi.status() == WL_CONNECTED; }
   void disconnect() override { WiFi.disconnect(); }

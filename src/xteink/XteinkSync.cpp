@@ -98,12 +98,12 @@ portMUX_TYPE resultMux = portMUX_INITIALIZER_UNLOCKED;
 char cachedResult[40] = "";
 bool cachedLoaded = false;
 
-bool heapOk(const bool tls) {
+bool heapOk(const bool tls, const bool logLow = true) {
   const uint32_t freeHeap = ESP.getFreeHeap();
   const uint32_t maxAlloc = ESP.getMaxAllocHeap();
   const bool ok = tls ? (freeHeap >= kMinFreeHeapTls && maxAlloc >= kMinMaxAllocTls)
                       : (freeHeap >= kMinFreeHeapPlain && maxAlloc >= kMinMaxAllocPlain);
-  if (!ok) {
+  if (!ok && logLow) {
     LOG_ERR(kTag, "Low heap for %s: %u free, %u max block", tls ? "https" : "http", static_cast<unsigned>(freeHeap),
             static_cast<unsigned>(maxAlloc));
   }
@@ -341,8 +341,29 @@ class Session {
     return status;
   }
 
+  // GETs a same-origin path on the kept-alive connection, streaming a 2xx body
+  // to `onData` (other bodies are drained). Never follows redirects. Status,
+  // or -1 on a transport failure; `complete` tells a whole body from a cut one.
+  int stream(const std::string& path, const freeink::SecureHttpClient::DataCallback& onData, bool& complete) {
+    WifiPowerSaveGuard psGuard;
+    if (https) tls_trust::ensureClockForTls();
+    complete = false;
+    if (!http->begin(origin + path)) return -1;
+    configure(*http, true);
+    freeink::SecureHttpClient& client = *http;
+    const int status = http->sendRequest(
+        "GET", nullptr, 0,
+        [&client, &onData](const uint8_t* data, const size_t len) {
+          const int s = client.getStatus();
+          return s < 200 || s >= 300 || onData(data, len);
+        },
+        abortCallback());
+    complete = !http->aborted() && http->responseComplete();
+    return http->aborted() ? kCallAborted : status;
+  }
+
   // Drops the kept-alive connection so only one TLS session exists at a time
-  // (downloads open their own).
+  // (a download that cannot reuse it opens its own).
   void close() {
     if (http) http->end();
   }
@@ -359,19 +380,27 @@ Error callError(const int status) {
   return errorForStatus(status);
 }
 
-// GET item.url into kPartPath, hashing as it streams. A dropped connection is
-// resumed with Range inside fetchResumable; a 416 discards the partial bytes
-// and starts again from 0 once (docs/device-protocol.md, Errors). The body
-// reaches the card through a staged::Writer: kWriteBlock-sized aligned writes,
-// each retried from its own offset before the item fails (StagedWriter.h).
-Error downloadItem(const Session& session, const QueueItem& item, const Callbacks& cb, Progress& progress) {
+// GET item.url into kPartPath, hashing as it streams. The first request reuses
+// the session's kept-alive connection (no new TLS handshake) when the heap
+// floor holds with that connection still open; otherwise the connection is
+// closed first, as for every later request. A dropped connection is resumed
+// with Range inside fetchResumable on a fresh connection; a 416 discards the
+// partial bytes and starts again from 0 once (docs/device-protocol.md,
+// Errors). The body reaches the card through a staged::Writer:
+// kWriteBlock-sized aligned writes, each retried from its own offset before
+// the item fails (StagedWriter.h).
+Error downloadItem(Session& session, const QueueItem& item, const Callbacks& cb, Progress& progress) {
   for (int attempt = 0; attempt < 2; ++attempt) {
     // The staging block is taken first so the heap check below sees what is
     // left for the TLS session: checked before it, the session got 4 KB less
     // than the floor promises.
     auto block = makeUniqueNoThrow<uint8_t[]>(kWriteBlock);
     if (!block) return Error::LowMemory;
-    if (!heapOk(session.https)) return Error::LowMemory;
+    const bool reuse = attempt == 0 && !item.url.empty() && item.url[0] == '/' && heapOk(session.https, false);
+    if (!reuse) {
+      session.close();
+      if (!heapOk(session.https)) return Error::LowMemory;
+    }
     Storage.remove(kPartPath);
     HalFile file;
     if (!Storage.openFileForWrite(kTag, kPartPath, file)) return Error::SdCard;
@@ -422,11 +451,55 @@ Error downloadItem(const Session& session, const QueueItem& item, const Callback
     };
 
     freeink::FetchResult result;
-    {
+    freeink::FetchOptions resume;
+    bool needFetch = true;
+    if (reuse) {
+      bool complete = false;
+      const unsigned long t0 = millis();
+      const int status = session.stream(
+          item.url,
+          [&](const uint8_t* data, const size_t len) {
+            if (!sink.write(data, len)) {
+              result.stopped = true;
+              return false;
+            }
+            result.bytes += len;
+            sink.progress(result.bytes, expected);
+            return true;
+          },
+          complete);
+      LOG_INF(kTag, "Item %lld: reused connection, status %d, %u bytes, %s, %lu ms", static_cast<long long>(item.id),
+              status, static_cast<unsigned>(result.bytes), complete ? "complete" : "incomplete", millis() - t0);
+      result.status = status;
+      result.aborted = status == kCallAborted;
+      const bool redirect = status >= 300 && status < 400;
+      // Done here: a whole body, the sink's own stop, an abort, or an error
+      // status. A redirect or a dropped connection goes on below.
+      needFetch = !result.aborted && !result.stopped && (status < 0 || redirect || (status == 200 && !complete));
+      if (!needFetch) {
+        result.complete = status >= 200 && status < 300 && complete;
+      } else {
+        // Resume the cut body with Range; after a redirect or a transport
+        // failure with nothing received, start from 0.
+        resume.startOffset = status == 200 ? result.bytes : 0;
+        if (resume.startOffset == 0 && result.bytes > 0 && !sink.rewind()) {
+          Storage.remove(kPartPath);
+          return Error::SdCard;
+        }
+        result.bytes = resume.startOffset;
+        session.close();
+        if (!heapOk(session.https)) {
+          file.close();
+          Storage.remove(kPartPath);
+          return Error::LowMemory;
+        }
+      }
+    }
+    if (needFetch) {
       WifiPowerSaveGuard psGuard;
       if (session.https) tls_trust::ensureClockForTls();
       result = freeink::fetchResumable(
-          session.origin + item.url, freeink::FetchOptions{},
+          session.origin + item.url, resume,
           [&session](freeink::SecureHttpClient& http, const bool sameOrigin) { session.configure(http, sameOrigin); },
           sink, session.abortCallback());
     }
@@ -793,7 +866,6 @@ Outcome run(const GfxRenderer* renderer, const Callbacks& cb, const uint32_t ite
     if (alreadyHere) {
       path = have->path;
     } else {
-      session->close();
       const Error e = downloadItem(*session, item, cb, progress);
       if (isFatal(e)) {
         fatal = e;

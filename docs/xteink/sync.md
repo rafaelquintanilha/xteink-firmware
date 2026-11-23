@@ -52,9 +52,15 @@ Upstream files get only small hooks:
 4. **Each item.**
    - The item is streamed to `/.crosspoint/xteink-download.part` and hashed as
      it arrives.
-   - A dropped connection resumes with `Range` inside the same sync
-     (freeink `fetchResumable`). A `416` discards the partial bytes and starts
-     again from 0, once.
+   - The first request for an item reuses the API connection that is already
+     open, so a delivery needs no TLS handshake beyond the first status call;
+     the ack and the closing status report go over the same connection. This
+     needs the https heap floor (below) to hold with that connection open. When
+     it does not, or for a redirect, the API connection is closed and the item
+     is fetched on a fresh one, as before.
+   - A dropped connection resumes with `Range` on a fresh connection inside the
+     same sync (freeink `fetchResumable`). A `416` discards the partial bytes
+     and starts again from 0, once.
    - Once the size and sha256 match, the file is renamed into its kind folder:
      books into `/Books`, articles into `/Articles`, transcripts into
      `/xteink/transcripts` and newspapers into `/xteink/newspapers`. The
@@ -148,8 +154,8 @@ actually gets.
 These steps reduce peak heap:
 
 - Before syncing, the client drops the rebuildable SD-font caches.
-- Only one TLS session is open at a time: the API connection is closed
-  before each download.
+- Only one TLS session is open at a time: a download either reuses the API
+  connection or closes it before opening its own.
 - The queue and manifest are parsed into small structs, and the JSON is
   freed.
 - The status line state is a 40-byte static.
@@ -192,7 +198,10 @@ off when it returns, whether or not the routine ran.
      - The join scans first and tries only saved networks it found, the
        last-connected one first (`wifijoin::joinAnySaved`, `scanFirst`). With
        none in range it ends after one scan, not after an 8 s attempt on the
-       last network. A hidden network is not joined this way.
+       last network. A hidden network is not joined this way. The scan dwells
+       120 ms per channel (Arduino's default is 300 ms), and the join is given
+       the channel the scan saw, so the driver does not scan again before it
+       connects.
      - With no clock, SNTP gets `kWakeClockBudgetMs` (3 s). When it answers,
        the 06:00 gate applies as usual and a due daily run happens in the same
        start. When it does not, the content check still runs; only the daily

@@ -14,6 +14,7 @@ namespace xteink::wifijoin {
 struct ScanResult {
   std::string ssid;
   int rssi = 0;
+  int32_t channel = 0;  // 0 = unknown
 };
 
 struct Credential {
@@ -44,7 +45,9 @@ class WifiPort {
   virtual size_t savedCount() = 0;
   // Blocking scan, bounded by the port to at most maxMs.
   virtual std::vector<ScanResult> scan(uint32_t maxMs) = 0;
-  virtual void begin(const std::string& ssid, const std::string& password) = 0;
+  // `channel` is where the scan saw the network (0 = unknown, the driver scans
+  // for it); a known channel lets the connect skip its own scan.
+  virtual void begin(const std::string& ssid, const std::string& password, int32_t channel) = 0;
   virtual bool connected() = 0;
   virtual void disconnect() = 0;
   virtual void sleepMs(uint32_t ms) = 0;

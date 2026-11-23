@@ -63,7 +63,8 @@ Upstream files get only small hooks:
      and starts again from 0, once.
    - Once the size and sha256 match, the file is renamed into its kind folder:
      books into `/Books`, articles into `/Articles`, transcripts into
-     `/xteink/transcripts` and newspapers into `/xteink/newspapers`. The
+     `/Transcripts` and newspapers into `/Newspapers` (earlier builds used
+     `/xteink/transcripts` and `/xteink/newspapers`). The
      folder is created when missing. Files delivered earlier stay where they
      are; nothing already on the card is moved. The client never overwrites a
      sideloaded or user-modified file. If the title is taken inside that
@@ -268,6 +269,15 @@ every routine starts cold (scan-first join, SNTP, a fresh TLS handshake), and
 with the earlier 105 s cap a real X4 deferred every install for time
 (`deferred:time`). The sync stops starting new items 10 s before the cap and is cancelled
 at the cap.
+
+## Recently sent
+
+On a provisioned device Home has a **Recently sent** row under **Sync books
+now**: the last 20 delivered files still on the card, newest first, each with
+the folder it landed in; Confirm opens one. The order comes from the server's
+item ids in the delivered-file manifest, not from file dates: the X4 has no
+clock when it writes a file, so every delivery carries the same default date
+and the Library's Recent shelf cannot tell them apart.
 
 ## Status line
 

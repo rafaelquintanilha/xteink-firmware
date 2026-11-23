@@ -228,9 +228,9 @@ const char* kindFolder(const ItemKind kind) {
     case ItemKind::Article:
       return "/Articles";
     case ItemKind::Transcript:
-      return "/xteink/transcripts";
+      return "/Transcripts";
     case ItemKind::Newspaper:
-      return "/xteink/newspapers";
+      return "/Newspapers";
     case ItemKind::Book:
       break;
   }
@@ -325,6 +325,33 @@ bool Manifest::removePath(const std::string& path) {
     }
   }
   return false;
+}
+
+std::vector<DeliveredFile> newestDeliveries(const Manifest& m, const size_t max) {
+  std::vector<DeliveredFile> out;
+  if (max == 0) return out;
+  std::vector<const DeliveredFile*> order;
+  order.reserve(m.files.size());
+  for (const auto& f : m.files) order.push_back(&f);
+  // Stable: equal ids (an old manifest without ids) keep manifest order, last added first.
+  std::reverse(order.begin(), order.end());
+  std::stable_sort(order.begin(), order.end(),
+                   [](const DeliveredFile* a, const DeliveredFile* b) { return a->itemId > b->itemId; });
+  out.reserve(std::min(max, order.size()));
+  for (const DeliveredFile* f : order) {
+    if (out.size() >= max) break;
+    const bool seen = std::any_of(out.begin(), out.end(), [f](const DeliveredFile& o) { return o.path == f->path; });
+    if (!seen && !f->path.empty()) out.push_back(*f);
+  }
+  return out;
+}
+
+std::string deliveredDisplayName(const std::string& path) {
+  const size_t slash = path.find_last_of('/');
+  std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+  const size_t dot = name.find_last_of('.');
+  if (dot != std::string::npos && dot > 0) name.erase(dot);
+  return name;
 }
 
 bool parseManifest(const char* json, const size_t len, Manifest& out) {

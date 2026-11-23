@@ -1028,4 +1028,16 @@ void drawHomeStatusLine(const GfxRenderer& renderer, const int contentBottom) {
   renderer.drawCenteredText(SMALL_FONT_ID, y, line);
 }
 
+std::vector<DeliveredFile> recentDeliveries(const size_t max) {
+  Manifest manifest;
+  loadManifest(manifest);
+  // A few spare entries so files deleted from the card do not shorten the list.
+  std::vector<DeliveredFile> out = newestDeliveries(manifest, max + 8);
+  out.erase(
+      std::remove_if(out.begin(), out.end(), [](const DeliveredFile& f) { return !Storage.exists(f.path.c_str()); }),
+      out.end());
+  if (out.size() > max) out.resize(max);
+  return out;
+}
+
 }  // namespace xteink::sync

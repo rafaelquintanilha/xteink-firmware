@@ -24,6 +24,7 @@
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "activities/library/RecentlySentActivity.h"
 #include "activities/plugins/PluginCatalogActivity.h"  // anyPluginInstalled()
 #include "activities/settings/XteinkSyncActivity.h"
 #include "components/UITheme.h"
@@ -41,7 +42,7 @@ int HomeActivity::getMenuItemCount() const {
     count++;
   }
   if (hasSyncSlot()) {
-    count++;
+    count += 2;  // Sync books now, Recently sent
   }
   return count;
 }
@@ -365,6 +366,9 @@ void HomeActivity::loop() {
       case HomeMenuItem::XTEINK_SYNC:
         onSyncOpen();
         break;
+      case HomeMenuItem::XTEINK_RECENT:
+        onRecentlySentOpen();
+        break;
       case HomeMenuItem::SETTINGS_MENU:
         onSettingsOpen();
         break;
@@ -582,6 +586,8 @@ void HomeActivity::render(RenderLock&&) {
   if (hasSyncSlot()) {
     menuItems.insert(menuItems.end() - 1, tr(STR_XTEINK_SYNC_NOW));
     menuIcons.insert(menuIcons.end() - 1, Wifi);
+    menuItems.insert(menuItems.end() - 1, tr(STR_XTEINK_RECENT));
+    menuIcons.insert(menuIcons.end() - 1, Recent);
   }
 
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
@@ -634,6 +640,15 @@ void HomeActivity::onSyncOpen() {
   auto activity = makeUniqueNoThrow<XteinkSyncActivity>(renderer, mappedInput);
   if (!activity) {
     LOG_ERR("HOME", "OOM: XteinkSyncActivity");
+    return;
+  }
+  activityManager.replaceActivity(std::move(activity));
+}
+
+void HomeActivity::onRecentlySentOpen() {
+  auto activity = makeUniqueNoThrow<RecentlySentActivity>(renderer, mappedInput);
+  if (!activity) {
+    LOG_ERR("HOME", "OOM: RecentlySentActivity");
     return;
   }
   activityManager.replaceActivity(std::move(activity));

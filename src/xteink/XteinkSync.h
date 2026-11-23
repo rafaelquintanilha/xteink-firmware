@@ -66,4 +66,8 @@ bool statusLine(char* buf, size_t len);
 // below `contentBottom` (the last drawn home row); otherwise draws nothing.
 void drawHomeStatusLine(const GfxRenderer& renderer, int contentBottom);
 
+// The files the server delivered, newest first (newestDeliveries), at most
+// `max`, leaving out the ones no longer on the card. Main task only (SD).
+std::vector<DeliveredFile> recentDeliveries(size_t max);
+
 }  // namespace xteink::sync

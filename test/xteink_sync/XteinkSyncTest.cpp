@@ -132,8 +132,8 @@ TEST(XteinkSyncQueue, AbsentUnknownOrNonStringKindIsBook) {
 TEST(XteinkSyncKind, FolderPerKind) {
   EXPECT_STREQ(kindFolder(ItemKind::Book), "/Books");
   EXPECT_STREQ(kindFolder(ItemKind::Article), "/Articles");
-  EXPECT_STREQ(kindFolder(ItemKind::Transcript), "/xteink/transcripts");
-  EXPECT_STREQ(kindFolder(ItemKind::Newspaper), "/xteink/newspapers");
+  EXPECT_STREQ(kindFolder(ItemKind::Transcript), "/Transcripts");
+  EXPECT_STREQ(kindFolder(ItemKind::Newspaper), "/Newspapers");
   EXPECT_STREQ(kindFolder(static_cast<ItemKind>(99)), "/Books");  // unknown -> book folder
 }
 
@@ -460,4 +460,31 @@ TEST(XteinkSntpPolicy, OneRetryAfterTheWindow) {
   EXPECT_EQ(sntp_policy::actionFor(inputs(false, true, false, true, sntp_policy::RETRY_AFTER_MS)), Action::Wait);
   EXPECT_EQ(sntp_policy::actionFor(inputs(false, false, true, true, sntp_policy::RETRY_AFTER_MS)),
             Action::StartAndWait);
+}
+
+TEST(XteinkSyncRecent, NewestItemIdFirstAndCapped) {
+  Manifest m;
+  m.files = {
+      {"a", "/Books/Old - A.epub", 2}, {"b", "/Articles/Newest - B.epub", 9}, {"c", "/Transcripts/Middle - C.epub", 5}};
+  const auto r = newestDeliveries(m, 2);
+  ASSERT_EQ(r.size(), 2u);
+  EXPECT_EQ(r[0].path, "/Articles/Newest - B.epub");
+  EXPECT_EQ(r[1].path, "/Transcripts/Middle - C.epub");
+  EXPECT_TRUE(newestDeliveries(m, 0).empty());
+}
+
+TEST(XteinkSyncRecent, OnePerPathAndLastAddedWinsATie) {
+  Manifest m;
+  m.files = {{"a", "/Articles/X.epub", 0}, {"b", "/Articles/Y.epub", 0}, {"c", "/Articles/X.epub", 0}};
+  const auto r = newestDeliveries(m, 10);
+  ASSERT_EQ(r.size(), 2u);
+  EXPECT_EQ(r[0].sha256, "c");  // added last
+  EXPECT_EQ(r[1].path, "/Articles/Y.epub");
+}
+
+TEST(XteinkSyncRecent, DisplayNameIsTheFileNameWithoutExtension) {
+  EXPECT_EQ(deliveredDisplayName("/Articles/How to Work Hard - Paul Graham.epub"), "How to Work Hard - Paul Graham");
+  EXPECT_EQ(deliveredDisplayName("/Books/Dr. No.epub"), "Dr. No");
+  EXPECT_EQ(deliveredDisplayName("/Books/.hidden"), ".hidden");
+  EXPECT_EQ(deliveredDisplayName("plain"), "plain");
 }

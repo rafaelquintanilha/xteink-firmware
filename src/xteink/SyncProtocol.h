@@ -178,6 +178,15 @@ struct Manifest {
 };
 
 bool parseManifest(const char* json, size_t len, Manifest& out);
+
+// The delivered files newest first, at most `max`, one entry per path. Server
+// item ids only grow, so the highest id is the latest item sent; no clock is
+// needed (the X4 has none to stamp files with).
+std::vector<DeliveredFile> newestDeliveries(const Manifest& m, size_t max);
+
+// "Title - Author" from "/Articles/Title - Author.epub": the file name without
+// folder or extension, as the delivered list shows it.
+std::string deliveredDisplayName(const std::string& path);
 std::string buildManifestJson(const Manifest& m);
 
 // A delete instruction applies to a file only when the server delivered it

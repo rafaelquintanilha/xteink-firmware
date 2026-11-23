@@ -46,9 +46,13 @@ namespace xteink::daily {
 // --- constants -------------------------------------------------------------
 
 // The single hard wall-clock cap for one routine, from its first step to the
-// end of the sync. The goal is a queued book on the device within 120 s of
-// power-on; boot to this hook takes a few seconds, so the routine gets 105 s.
-constexpr uint32_t kDailyRoutineCapMs = 105000;
+// end of the sync. An install needs kSyncReserveMs + kOtaMinInstallMs (95 s)
+// left after the firmware check, so the cap less 95 s is what the join, the
+// clock and the check may take. The X4 starts every routine cold (no RTC: a
+// scan-first join plus SNTP) and its first TLS handshake takes seconds; on a
+// real X4 those steps took more than 10 s and every install was deferred
+// (deferred:time). 125 s leaves them 30 s.
+constexpr uint32_t kDailyRoutineCapMs = 125000;
 // Below this battery level the routine does not run at all (same floor as the
 // sleep-time plugin-event join in main.cpp).
 constexpr int kDailyJoinBatteryFloor = 20;

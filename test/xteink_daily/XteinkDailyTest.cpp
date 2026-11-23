@@ -1216,10 +1216,20 @@ TEST(DailyCap, AnInstallStartsOnlyWithARealisticBudget) {
   EXPECT_EQ(run(p, Trigger::PowerOn).status, Status::Rebooting);
   EXPECT_GE(p.lastInstallBudget, kOtaMinInstallMs);
 
-  // A slow join leaves less than the minimum: deferred, the day's attempt kept.
+  // A cold X4 start (scan-first join, SNTP, a slow first handshake) still
+  // installs: 12 s before the check deferred every install at the 105 s cap.
+  FakePort x4 = dueDevice();
+  x4.ota = {sync::OtaDecision::Install, sync::Error::None};
+  x4.joinCostMs = 12000;
+  x4.checkCostMs = 4000;
+  EXPECT_EQ(run(x4, Trigger::PowerOn).status, Status::Rebooting);
+  EXPECT_GE(x4.lastInstallBudget, kOtaMinInstallMs);
+
+  // A start that leaves less than the minimum: deferred, the day's attempt kept.
   FakePort slow = dueDevice();
   slow.ota = {sync::OtaDecision::Install, sync::Error::None};
   slow.joinCostMs = 12000;
+  slow.checkCostMs = kDailyRoutineCapMs - kSyncReserveMs - kOtaMinInstallMs - 12000 + 2000;
   const Result r = run(slow, Trigger::PowerOn);
   EXPECT_EQ(r.fields.fwOutcome, "deferred:time");
   EXPECT_EQ(slow.installCalls, 0);

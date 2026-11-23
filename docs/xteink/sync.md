@@ -257,10 +257,13 @@ off when it returns, whether or not the routine ran.
    `partial:<code>`, `error:<code>`). A manual sync sends none of these.
 7. `last_run` is written once the sync step has run, whatever its result.
 
-Everything runs under one hard cap, `kDailyRoutineCapMs` (105 s). The
-target is a queued book on the device within 120 s of power-on. The OTA
+Everything runs under one hard cap, `kDailyRoutineCapMs` (125 s). The OTA
 install gets what is left after `kSyncReserveMs` (35 s), which is kept for the
-sync. The sync stops starting new items 10 s before the cap and is cancelled
+sync, and starts only when at least `kOtaMinInstallMs` (60 s) of that is left:
+the join, the clock and the firmware check share the first 30 s. On the X4
+every routine starts cold (scan-first join, SNTP, a fresh TLS handshake), and
+with the earlier 105 s cap a real X4 deferred every install for time
+(`deferred:time`). The sync stops starting new items 10 s before the cap and is cancelled
 at the cap.
 
 ## Status line

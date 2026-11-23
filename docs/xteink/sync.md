@@ -239,7 +239,10 @@ off when it returns, whether or not the routine ran.
 
    A deferred offer, or one whose install failed, shows "Update pending" on
    Home. A step that learns nothing about the offer (the check failed, or
-   there was no time to check) keeps an earlier "Update pending" note.
+   there was no time to check) keeps an earlier "Update pending" note. Any
+   sync clears it when the server's status reply offers no other build (no
+   offer, or the running one): the build may have been installed over USB or
+   the offer withdrawn since the daily check.
 
    An install starts only with at least `kOtaMinInstallMs` (60 s) left after
    the sync's reserve: about 30 s for a 6 MB image over the LAN plus one 30 s

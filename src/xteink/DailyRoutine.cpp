@@ -902,5 +902,11 @@ void onSyncSucceeded() {
   nvsWrite(kNvsNote, [](nvs_handle_t h) { return nvs_set_u8(h, kNvsNote, static_cast<uint8_t>(Note::None)); });
 }
 
+void onNoFirmwareOffer() {
+  if (homeNote() != Note::FirmwarePending) return;
+  cachedNote.store(static_cast<int>(Note::None));
+  nvsWrite(kNvsNote, [](nvs_handle_t h) { return nvs_set_u8(h, kNvsNote, static_cast<uint8_t>(Note::None)); });
+}
+
 }  // namespace xteink::daily
 #endif

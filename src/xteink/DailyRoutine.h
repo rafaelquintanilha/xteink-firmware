@@ -312,6 +312,12 @@ Note homeNote();
 // A sync that reached the server clears a stale "low battery" note (a manual
 // sync may succeed after today's routine was skipped).
 void onSyncSucceeded();
+
+// The server answered a status report with no offer for another build: clear
+// an "update pending" note. Otherwise it stays until the next daily check,
+// even after the build was installed some other way (USB) or the offer was
+// withdrawn.
+void onNoFirmwareOffer();
 #endif
 
 }  // namespace xteink::daily

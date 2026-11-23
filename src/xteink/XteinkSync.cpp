@@ -738,6 +738,8 @@ Outcome run(const GfxRenderer* renderer, const Callbacks& cb, const uint32_t ite
   std::unique_ptr<Session> session;
   int status = -1;
   bool heapSkipped = false;
+  // The status reply carries the server's firmware offer (or none).
+  std::string statusReply;
   {
     if (!canGrow(report.inventory.size() * 100 + 256)) {
       out.error = Error::LowMemory;
@@ -763,7 +765,8 @@ Outcome run(const GfxRenderer* renderer, const Callbacks& cb, const uint32_t ite
       candidate->budgetMs = candidate->https ? 0 : kLanTimeoutMs;
       if (cb.onProgress) cb.onProgress(cb.ctx, Progress{});
       const uint32_t probeStart = millis();
-      status = candidate->call("POST", "/api/device/status", &body, nullptr, 0);
+      statusReply.clear();
+      status = candidate->call("POST", "/api/device/status", &body, &statusReply, kMaxStatusResponse);
       const auto probeMs = static_cast<unsigned long>(millis() - probeStart);
       if (status == kCallAborted) {
         out.error = Error::Cancelled;
@@ -790,6 +793,17 @@ Outcome run(const GfxRenderer* renderer, const Callbacks& cb, const uint32_t ite
     LOG_ERR(kTag, "Status report: %d (%s)", status, errorCode(out.error));
     persistResult(out);
     return out;
+  }
+  {
+    // No offer, or one for the running build: nothing is pending, whatever
+    // the last daily check noted (the build may have arrived over USB).
+    FirmwareOffer offer;
+    if (parseStatusResponse(statusReply.data(), statusReply.size(), offer) &&
+        (!offer.present || sameFirmwareVersion(offer.version, kFirmwareVersion))) {
+      daily::onNoFirmwareOffer();
+    }
+    statusReply.clear();
+    statusReply.shrink_to_fit();
   }
   // Delivered: the closing report need not repeat it.
   otahealth::clearRolledBackVersion(report.rolledBackVersion);
